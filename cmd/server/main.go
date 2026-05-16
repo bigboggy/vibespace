@@ -75,7 +75,7 @@ func main() {
 	s, err := wish.NewServer(
 		wish.WithAddress(addr),
 		wish.WithHostKeyPath(hostKey),
-		wish.WithIdleTimeout(10*time.Minute),
+
 
 		// Accept any pubkey — we don't allowlist, we just want to capture the
 		// fingerprint for `/auth github` linking. Without a PublicKeyHandler,
