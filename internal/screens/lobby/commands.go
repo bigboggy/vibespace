@@ -34,6 +34,7 @@ var builtins = []command{
 	{"/sign", "sign a friend's guestbook"},
 	{"/leaderboard", "open the token-usage leaderboard"},
 	{"/leaderboard-join", "how to add yourself to the leaderboard"},
+	{"/nick", "set your display name"},
 	{"/theme", "switch color theme"},
 	{"/auth", "link your GitHub account"},
 	{"/logout", "unlink your GitHub account"},
@@ -69,6 +70,7 @@ var allowedWhenGated = map[string]bool{
 	"/quit":             true,
 	"/clear":            true,
 	"/theme":            true,
+	"/nick":             true,
 	"/profile":          true,
 	"/leaderboard":      true,
 	"/leaderboard-join": true,
@@ -134,6 +136,8 @@ func (s *Screen) handleSlash(text string) (*Screen, tea.Cmd) {
 		return s.cmdLogout()
 	case "/theme":
 		return s.cmdTheme(args)
+	case "/nick":
+		return s.cmdNick(args)
 	case "/profile":
 		return s.cmdProfile(args)
 	case "/friend":
@@ -262,6 +266,24 @@ func (s *Screen) cmdTheme(args []string) (*Screen, tea.Cmd) {
 	}
 	s.styles.SetTheme(t)
 	s.postSystem(fmt.Sprintf("theme set to %s (%s)", t.ID, t.DisplayName))
+	return s, nil
+}
+
+func (s *Screen) cmdNick(args []string) (*Screen, tea.Cmd) {
+	if len(args) == 0 {
+		s.postSystem(fmt.Sprintf("your display name is %s", s.meUser))
+		return s, nil
+	}
+	nick := strings.Join(args, " ")
+	nick = strings.TrimPrefix(nick, "@")
+	if nick == "" {
+		return s, nil
+	}
+	prev := s.meUser
+	s.meUser = nick
+	s.hub.Post(s.activeName, "*",
+		fmt.Sprintf("%s is now %s", prev, nick),
+		ui.ChatSystem)
 	return s, nil
 }
 
