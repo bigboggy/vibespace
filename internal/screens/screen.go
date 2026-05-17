@@ -97,4 +97,5 @@ const (
 	LobbyID       = "lobby"
 	ProfileID     = "profile"
 	LeaderboardID = "leaderboard"
+	RadioID       = "radio"
 )

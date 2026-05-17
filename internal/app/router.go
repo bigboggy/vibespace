@@ -4,6 +4,7 @@ import (
 	"github.com/bigboggy/vibespace/internal/hub"
 	"github.com/bigboggy/vibespace/internal/screens"
 	"github.com/bigboggy/vibespace/internal/screens/lobby"
+	radioscreen "github.com/bigboggy/vibespace/internal/screens/radio"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -55,6 +56,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.screens[screens.LobbyID] = ns
 		return a, cmd
 
+	case radioscreen.DownloadProgressMsg, radioscreen.DownloadFinishedMsg:
+		// Download messages must reach the radio screen even when the user
+		// has navigated away mid-download — otherwise the goroutine keeps
+		// running but the UI never resumes. Mirrors the hub.Event routing.
+		if rs, ok := a.screens[screens.RadioID]; ok {
+			ns, cmd := rs.Update(m)
+			a.screens[screens.RadioID] = ns
+			return a, cmd
+		}
+		return a, nil
+
 	case tea.KeyMsg:
 		return a.handleKey(m)
 	}
@@ -63,16 +75,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // navigate switches the active screen. Entering the lobby for the first time
-// triggers the "@boggy entered" join message.
+// triggers the "@boggy entered" join message. Screens that implement
+// OnEnter() return a Cmd that runs immediately after activation — used by
+// screens that lazily load remote data (e.g. the radio manifest) so the
+// response arrives when the screen is already current.
 func (a *App) navigate(target string) tea.Cmd {
-	if _, ok := a.screens[target]; !ok {
+	scr, ok := a.screens[target]
+	if !ok {
 		return nil
 	}
 	a.current = target
 	if target == screens.LobbyID {
-		if lob, ok := a.screens[screens.LobbyID].(*lobby.Screen); ok {
+		if lob, ok := scr.(*lobby.Screen); ok {
 			lob.EnsureJoined()
 		}
+	}
+	if entrant, ok := scr.(interface{ OnEnter() tea.Cmd }); ok {
+		return entrant.OnEnter()
 	}
 	return nil
 }

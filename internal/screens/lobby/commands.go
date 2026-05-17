@@ -34,6 +34,7 @@ var builtins = []command{
 	{"/sign", "sign a friend's guestbook"},
 	{"/leaderboard", "open the token-usage leaderboard"},
 	{"/leaderboard-join", "how to add yourself to the leaderboard"},
+	{"/radio", "browse the radio episodes"},
 	{"/nick", "set your display name"},
 	{"/theme", "switch color theme"},
 	{"/auth", "link your GitHub account"},
@@ -57,6 +58,9 @@ var aliases = map[string]string{
 	"/top":      "/leaderboard",
 	"/lb-join":  "/leaderboard-join",
 	"/join-lb":  "/leaderboard-join",
+	"/r":        "/radio",
+	"/tune":     "/radio",
+	"/listen":   "/radio",
 }
 
 // allowedWhenGated lists commands that work even when the session hasn't
@@ -74,6 +78,7 @@ var allowedWhenGated = map[string]bool{
 	"/profile":          true,
 	"/leaderboard":      true,
 	"/leaderboard-join": true,
+	"/radio":            true,
 }
 
 func canonicalName(name string) string {
@@ -158,6 +163,8 @@ func (s *Screen) handleSlash(text string) (*Screen, tea.Cmd) {
 		return s, screens.Navigate(screens.LeaderboardID)
 	case "/leaderboard-join":
 		return s, screens.OpenLeaderboardJoin()
+	case "/radio":
+		return s, screens.Navigate(screens.RadioID)
 	}
 	s.postSystem(fmt.Sprintf("unknown command %q — try /help", parts[0]))
 	return s, nil

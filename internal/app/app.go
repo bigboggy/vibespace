@@ -7,11 +7,13 @@ package app
 import (
 	"github.com/bigboggy/vibespace/internal/auth"
 	"github.com/bigboggy/vibespace/internal/hub"
+	"github.com/bigboggy/vibespace/internal/radio"
 	"github.com/bigboggy/vibespace/internal/screens"
 	"github.com/bigboggy/vibespace/internal/screens/intro"
 	"github.com/bigboggy/vibespace/internal/screens/leaderboard"
 	"github.com/bigboggy/vibespace/internal/screens/lobby"
 	"github.com/bigboggy/vibespace/internal/screens/profile"
+	radioscreen "github.com/bigboggy/vibespace/internal/screens/radio"
 	"github.com/bigboggy/vibespace/internal/store"
 	"github.com/bigboggy/vibespace/internal/theme"
 	"github.com/bigboggy/vibespace/internal/ui"
@@ -29,10 +31,16 @@ type App struct {
 
 	board *leaderboard.Screen // kept for navigation hooks (ShowJoin)
 
-	data *store.Store // queried by the top-right leaderboard widget
+	data        *store.Store // queried by the top-right leaderboard widget
+	radioPlayer radio.Player // closed during Cleanup so the audio device is released on session end
 
 	width, height int
 }
+
+// LocalMode identifies whether this session is running inside the locally
+// installed binary (true) or being served to an SSH client (false). Used to
+// gate features like radio playback that only work on the user's own machine.
+type LocalMode bool
 
 // New constructs a session app. styles owns the per-session renderer and the
 // current theme — pass a freshly built *theme.Styles per session so terminal
@@ -41,25 +49,44 @@ type App struct {
 // is the SSH pubkey fingerprint (may be empty); ghLogin is a pre-existing
 // GitHub link from the identity store (may be empty); h is the shared chat
 // backend; authSvc may be nil to disable /auth; data is the profile/posts
-// store (required). The intro screen is the initial active screen; it emits
+// store (required); radioClient drives the /radio screen (may be nil to
+// disable it); local distinguishes the locally installed binary from an SSH
+// session so the radio screen knows whether to offer downloads or nudge the
+// install one-liner. The intro screen is the initial active screen; it emits
 // Navigate(lobby) when its animation ends.
-func New(styles *theme.Styles, fallbackUser, fingerprint, ghLogin string, h *hub.Hub, authSvc *auth.Service, data *store.Store) *App {
+func New(styles *theme.Styles, fallbackUser, fingerprint, ghLogin string, h *hub.Hub, authSvc *auth.Service, data *store.Store, radioClient *radio.Client, radioDL *radio.Downloader, radioPlayer radio.Player, local LocalMode) *App {
 	lob := lobby.New(styles, fallbackUser, fingerprint, ghLogin, h, authSvc, data)
 	prof := profile.New(styles, data)
 	board := leaderboard.New(styles, data)
+	scrns := map[string]screens.Screen{
+		screens.IntroID:       intro.New(styles),
+		screens.LobbyID:       lob,
+		screens.ProfileID:     prof,
+		screens.LeaderboardID: board,
+	}
+	if radioClient != nil {
+		mode := radioscreen.ModeRemote
+		dl := (*radio.Downloader)(nil)
+		if local {
+			mode = radioscreen.ModeLocal
+			dl = radioDL
+		}
+		// Player is required by the screen; if the caller passed nil we
+		// substitute the platform's no-op stub so the screen still works.
+		if radioPlayer == nil {
+			radioPlayer = radio.NewPlayer()
+		}
+		scrns[screens.RadioID] = radioscreen.New(styles, radioClient, dl, radioPlayer, mode)
+	}
 	return &App{
-		styles: styles,
-		screens: map[string]screens.Screen{
-			screens.IntroID:       intro.New(styles),
-			screens.LobbyID:       lob,
-			screens.ProfileID:     prof,
-			screens.LeaderboardID: board,
-		},
-		current: screens.IntroID,
-		lobby:   lob,
-		profile: prof,
-		board:   board,
-		data:    data,
+		styles:      styles,
+		screens:     scrns,
+		current:     screens.IntroID,
+		lobby:       lob,
+		profile:     prof,
+		board:       board,
+		data:        data,
+		radioPlayer: radioPlayer,
 	}
 }
 
@@ -73,11 +100,14 @@ func (a *App) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// Cleanup releases per-session resources (hub subscription). Safe to call more
-// than once.
+// Cleanup releases per-session resources (hub subscription, audio device).
+// Safe to call more than once.
 func (a *App) Cleanup() {
 	if a.lobby != nil {
 		a.lobby.Cleanup()
+	}
+	if a.radioPlayer != nil {
+		a.radioPlayer.Close()
 	}
 }
 

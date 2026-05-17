@@ -13,6 +13,7 @@ import (
 	"github.com/bigboggy/vibespace/internal/auth"
 	"github.com/bigboggy/vibespace/internal/hub"
 	"github.com/bigboggy/vibespace/internal/identity"
+	"github.com/bigboggy/vibespace/internal/radio"
 	"github.com/bigboggy/vibespace/internal/reportcli"
 	"github.com/bigboggy/vibespace/internal/store"
 	"github.com/bigboggy/vibespace/internal/theme"
@@ -58,12 +59,23 @@ func main() {
 		fingerprint = localFingerprint()
 	}
 
+	// Radio manifest + on-disk cache. The client caches under the per-user
+	// config dir so the manifest survives across runs and tolerates offline
+	// launches. VIBESPACE_RADIO_MANIFEST overrides the manifest URL for dev.
+	// The downloader writes finished shows into the same dir.
+	radioDir := localRadioDir()
+	radioClient := radio.NewClient(radioDir, os.Getenv("VIBESPACE_RADIO_MANIFEST"))
+	radioDL := radio.NewDownloader(radioDir)
+	// Real audio player on platforms that support it (macOS/Windows via
+	// purego, Linux+CGO via ALSA). The stub is used by linux/!cgo builds.
+	radioPlayer := radio.NewPlayer()
+
 	styles := theme.New(lipgloss.DefaultRenderer(), theme.Default())
 	// No mouse capture — the app doesn't consume mouse events, and capturing
 	// them blocks the terminal's native click-and-drag text selection (which
 	// users need to copy the install one-liner out of the join dialog).
 	p := tea.NewProgram(
-		app.New(styles, localUser(), fingerprint, ghLogin, h, authSvc, data),
+		app.New(styles, localUser(), fingerprint, ghLogin, h, authSvc, data, radioClient, radioDL, radioPlayer, app.LocalMode(true)),
 		tea.WithAltScreen(),
 	)
 	if _, err := p.Run(); err != nil {
@@ -88,6 +100,14 @@ func localConfigDir() string {
 
 func localDBPath() string {
 	return localConfigDir() + "/vibespace.db"
+}
+
+// localRadioDir is the per-user directory the radio client uses for the
+// manifest cache (and, once Phase 2 lands, downloaded episodes).
+func localRadioDir() string {
+	root := localConfigDir() + "/radio"
+	_ = os.MkdirAll(root, 0o700)
+	return root
 }
 
 // localAuth wires the /auth flow in local mode when VIBESPACE_GH_CLIENT_ID is

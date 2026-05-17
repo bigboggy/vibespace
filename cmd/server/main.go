@@ -11,6 +11,8 @@
 //	VIBESPACE_GH_CLIENT_ID   GitHub OAuth app client id (enables /auth github)
 //	VIBESPACE_IDENTITY_PATH  path to identity store JSON, default "./identities.json"
 //	VIBESPACE_DATA_PATH      path to profile/posts/friends SQLite DB, default "./vibespace.db"
+//	VIBESPACE_RADIO_CACHE    dir for the radio manifest cache, default "./radio-cache"
+//	VIBESPACE_RADIO_MANIFEST radio manifest URL override (default = release-hosted manifest)
 //
 // Run on a non-22 port unless you've moved system OpenSSH. Front it with a
 // tunnel or VPS proxy before pointing public DNS at your home machine.
@@ -31,6 +33,7 @@ import (
 	"github.com/bigboggy/vibespace/internal/auth"
 	"github.com/bigboggy/vibespace/internal/hub"
 	"github.com/bigboggy/vibespace/internal/identity"
+	"github.com/bigboggy/vibespace/internal/radio"
 	"github.com/bigboggy/vibespace/internal/store"
 	"github.com/bigboggy/vibespace/internal/theme"
 	tea "github.com/charmbracelet/bubbletea"
@@ -48,6 +51,10 @@ func main() {
 	ghClientID := os.Getenv("VIBESPACE_GH_CLIENT_ID")
 	identityPath := envOr("VIBESPACE_IDENTITY_PATH", "./identities.json")
 	dataPath := envOr("VIBESPACE_DATA_PATH", "./vibespace.db")
+	radioCacheDir := envOr("VIBESPACE_RADIO_CACHE", "./radio-cache")
+	radioManifestURL := os.Getenv("VIBESPACE_RADIO_MANIFEST")
+	_ = os.MkdirAll(radioCacheDir, 0o700)
+	radioClient := radio.NewClient(radioCacheDir, radioManifestURL)
 
 	world := hub.New()
 
@@ -93,7 +100,7 @@ func main() {
 		}),
 
 		wish.WithMiddleware(
-			bm.Middleware(teaHandler(world, authSvc, data)),
+			bm.Middleware(teaHandler(world, authSvc, data, radioClient)),
 			activeterm.Middleware(),
 			// reportMiddleware sits outside activeterm so `ssh -T host report`
 			// (no PTY, command="report") gets handled before activeterm bounces
@@ -136,7 +143,7 @@ func main() {
 }
 
 // teaHandler returns a wish bubbletea handler that builds a per-session app.
-func teaHandler(world *hub.Hub, authSvc *auth.Service, data *store.Store) bm.Handler {
+func teaHandler(world *hub.Hub, authSvc *auth.Service, data *store.Store, radioClient *radio.Client) bm.Handler {
 	return func(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
 		_, _, hasPty := sess.Pty()
 		if !hasPty {
@@ -159,7 +166,12 @@ func teaHandler(world *hub.Hub, authSvc *auth.Service, data *store.Store) bm.Han
 		// can't render them.
 		styles := theme.New(bm.MakeRenderer(sess), theme.Default())
 
-		a := app.New(styles, fallback, fingerprint, ghLogin, world, authSvc, data)
+		// SSH sessions get LocalMode=false — /radio shows the install nudge
+		// instead of offering downloads, since audio output can't traverse SSH.
+		// Downloader and player are nil because audio doesn't make sense on
+		// the server side; app.New will substitute a stub player so the
+		// screen still renders correctly.
+		a := app.New(styles, fallback, fingerprint, ghLogin, world, authSvc, data, radioClient, nil, nil, app.LocalMode(false))
 
 		// Cleanup on session end: SSH closes ctx -> unsubscribe + free resources.
 		go func() {
