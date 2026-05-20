@@ -2,3 +2,4 @@
 .idea
 .ssh
 dist
+.env.release

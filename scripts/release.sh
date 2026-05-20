@@ -66,8 +66,18 @@ DIST="$REPO_ROOT/dist/$VERSION"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
+# Load env file if it exists (e.g. .env.release)
+ENV_FILE="$REPO_ROOT/.env.release"
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
 if [[ -z "${VIBESPACE_GH_CLIENT_ID:-}" ]]; then
   error "VIBESPACE_GH_CLIENT_ID not set — required for baking into release"
+  error "Create $ENV_FILE with: VIBESPACE_GH_CLIENT_ID=Ov1.xxx..."
   exit 1
 fi
 LDFLAGS="-s -w -X main.version=$VERSION -X main.bakedClientID=$VIBESPACE_GH_CLIENT_ID"
