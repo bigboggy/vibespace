@@ -252,6 +252,19 @@ else
   warn "Once that's done the next scheduled run will succeed automatically."
 fi
 
+# ── persist client ID for the user ────────────────────────────────────────
+if [[ -n "$CLIENT_ID" ]]; then
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile"; do
+    [[ -f "$rc" ]] || continue
+    if grep -q 'VIBESPACE_GH_CLIENT_ID' "$rc" 2>/dev/null; then
+      continue
+    fi
+    printf "\nexport VIBESPACE_GH_CLIENT_ID=%s\n" "$CLIENT_ID" >> "$rc"
+    info "added VIBESPACE_GH_CLIENT_ID to $rc"
+    break
+  done
+fi
+
 cat <<'EOF'
 
 Installed. Next:

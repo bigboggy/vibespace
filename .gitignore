@@ -3,3 +3,5 @@
 .ssh
 dist
 .env.release
+vibespace
+vibespace.db
