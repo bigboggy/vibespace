@@ -73,9 +73,13 @@ vibespace.sh {
     reverse_proxy /ws 127.0.0.1:8080
     reverse_proxy /healthz 127.0.0.1:8080
 
-    # Optional: keep something at the root so vibespace.sh isn't blank.
-    # Without a root handler Caddy returns 404 — fine for a backend-only host.
-    respond / "vibespace — ssh vibespace.sh -p 2222 to peek, or install: curl https://vibespace.sh/install.sh | bash" 200
+    root * /var/www/html
+    file_server
+    encode gzip
+    header {
+        Cross-Origin-Opener-Policy same-origin
+        Cross-Origin-Embedder-Policy require-corp
+    }
 }
 ```
 
