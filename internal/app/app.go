@@ -1,7 +1,7 @@
 // Package app is the bubbletea Model that wires everything together.
 //
 // One App per session. App owns the intro + lobby screens for this session;
-// chat state itself lives in the shared *hub.Hub passed to New.
+// chat state itself lives in the shared hub.Hub passed to New.
 package app
 
 import (
@@ -54,7 +54,7 @@ type LocalMode bool
 // session so the radio screen knows whether to offer downloads or nudge the
 // install one-liner. The intro screen is the initial active screen; it emits
 // Navigate(lobby) when its animation ends.
-func New(styles *theme.Styles, fallbackUser, fingerprint, ghLogin string, h *hub.Hub, authSvc *auth.Service, data *store.Store, radioClient *radio.Client, radioDL *radio.Downloader, radioPlayer radio.Player, local LocalMode) *App {
+func New(styles *theme.Styles, fallbackUser, fingerprint, ghLogin string, h hub.Hub, authSvc *auth.Service, data *store.Store, radioClient *radio.Client, radioDL *radio.Downloader, radioPlayer radio.Player, local LocalMode) *App {
 	lob := lobby.New(styles, fallbackUser, fingerprint, ghLogin, h, authSvc, data)
 	prof := profile.New(styles, data)
 	board := leaderboard.New(styles, data)

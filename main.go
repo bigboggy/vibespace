@@ -1,13 +1,21 @@
 // vibespace — a TUI lobby for devs and vibe coders.
 //
-// This is the local-mode entrypoint: one user, one hub, one bubbletea program.
+// This is the locally-installed binary. By default it connects to the
+// vibespace.sh backend over WebSocket so chat is shared with every other
+// binary user (and the SSH "glimpse" sessions). When VIBESPACE_BACKEND is
+// empty (or the connection fails), it falls back to an in-process LocalHub
+// — you still get the TUI, radio playback, and report subcommand, but
+// chat is single-user.
+//
 // The SSH-server entrypoint lives in cmd/server.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/user"
+	"time"
 
 	"github.com/bigboggy/vibespace/internal/app"
 	"github.com/bigboggy/vibespace/internal/auth"
@@ -20,6 +28,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// defaultBackend is the production WebSocket endpoint. Override via
+// VIBESPACE_BACKEND for dev (e.g. ws://localhost:8080/ws); set to "off" to
+// force fully offline mode.
+const defaultBackend = "wss://vibespace.sh/ws"
 
 func main() {
 	// Subcommand dispatch. Only `report` is a non-TUI flow today; everything
@@ -35,9 +48,25 @@ func main() {
 	// double-fire. Runs detached — no impact on TUI startup.
 	reportcli.KickBackground(localConfigDir())
 
-	h := hub.New()
-	// Local-mode SQLite lives under the user's config dir so profiles persist
-	// across runs without polluting the working directory.
+	// Try to attach to the shared backend first. Falls back to an offline
+	// LocalHub if no backend is configured or the connection fails — the
+	// rest of the app (radio, profile, report) still works either way.
+	configDir := localConfigDir()
+	var (
+		h            hub.Hub
+		fallbackUser = localUser()
+		ghLogin      string
+	)
+	if rh := connectBackend(configDir); rh != nil {
+		h = rh
+		fallbackUser = rh.User()
+		ghLogin = rh.GhLogin()
+	} else {
+		h = hub.NewLocal()
+	}
+
+	// SQLite lives under the user's config dir so profiles persist across
+	// runs without polluting the working directory.
 	dbPath := localDBPath()
 	data, err := store.Open(dbPath)
 	if err != nil {
@@ -46,14 +75,14 @@ func main() {
 	}
 	defer data.Close()
 
-	// Optional /auth in local mode — set VIBESPACE_GH_CLIENT_ID to enable.
-	// The identity store sits next to the SQLite DB. With no client id, /auth
-	// stays disabled and the lobby is just a local chat surface.
-	authSvc, ghLogin := localAuth(data)
+	// /auth via SSH-key + GitHub device flow (the old in-lobby path) is only
+	// wired in offline mode now. In backend mode the device flow runs once at
+	// startup (see connectBackend), so the lobby's /auth disappears.
+	var authSvc *auth.Service
+	if ghLogin == "" {
+		authSvc, ghLogin = localAuth(data)
+	}
 
-	// In local mode the "fingerprint" is the synthesized identity key (see
-	// localFingerprint) — only meaningful when authSvc is non-nil. Pass it
-	// either way; the lobby just stashes it.
 	fingerprint := ""
 	if authSvc != nil {
 		fingerprint = localFingerprint()
@@ -75,7 +104,7 @@ func main() {
 	// them blocks the terminal's native click-and-drag text selection (which
 	// users need to copy the install one-liner out of the join dialog).
 	p := tea.NewProgram(
-		app.New(styles, localUser(), fingerprint, ghLogin, h, authSvc, data, radioClient, radioDL, radioPlayer, app.LocalMode(true)),
+		app.New(styles, fallbackUser, fingerprint, ghLogin, h, authSvc, data, radioClient, radioDL, radioPlayer, app.LocalMode(true)),
 		tea.WithAltScreen(),
 	)
 	if _, err := p.Run(); err != nil {
@@ -153,4 +182,73 @@ func localUser() string {
 		return "@" + u.Username
 	}
 	return "@local"
+}
+
+// connectBackend tries to reach the shared chat backend. Returns nil — and
+// prints a friendly note — when backend is disabled, misconfigured, or
+// unreachable. The TUI still launches in offline (LocalHub) mode.
+//
+// On the happy path it loads a cached GitHub access token, falls through
+// to a fresh device flow if none, then dials the WS endpoint.
+func connectBackend(configDir string) *hub.RemoteHub {
+	backend := os.Getenv("VIBESPACE_BACKEND")
+	if backend == "" {
+		backend = defaultBackend
+	}
+	if backend == "off" {
+		fmt.Println("vibespace: VIBESPACE_BACKEND=off → offline mode")
+		return nil
+	}
+
+	clientID := os.Getenv("VIBESPACE_GH_CLIENT_ID")
+	if clientID == "" {
+		fmt.Println("vibespace: VIBESPACE_GH_CLIENT_ID not set — running offline. Set it to enable shared chat.")
+		return nil
+	}
+
+	tokPath := authPath(configDir)
+	token, login := loadToken(tokPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if token == "" {
+		var err error
+		token, login, err = runDeviceFlow(ctx, clientID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vibespace: device flow: %v\n  → offline mode\n", err)
+			return nil
+		}
+		if err := saveToken(tokPath, token, login); err != nil {
+			// Non-fatal — we still have the token in memory for this run.
+			fmt.Fprintf(os.Stderr, "vibespace: couldn't persist token: %v\n", err)
+		}
+	}
+
+	rh, err := hub.Dial(ctx, backend, token)
+	if err == nil {
+		return rh
+	}
+	if !looksLikeAuthError(err) {
+		fmt.Fprintf(os.Stderr, "vibespace: backend %s: %v\n  → offline mode\n", backend, err)
+		return nil
+	}
+
+	// Token rejected — drop it and try a fresh device flow once.
+	fmt.Fprintln(os.Stderr, "vibespace: cached token rejected — re-linking GitHub…")
+	clearToken(tokPath)
+	token, login, err = runDeviceFlow(ctx, clientID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vibespace: device flow: %v\n  → offline mode\n", err)
+		return nil
+	}
+	if err := saveToken(tokPath, token, login); err != nil {
+		fmt.Fprintf(os.Stderr, "vibespace: couldn't persist token: %v\n", err)
+	}
+	rh, err = hub.Dial(ctx, backend, token)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vibespace: backend %s: %v\n  → offline mode\n", backend, err)
+		return nil
+	}
+	return rh
 }

@@ -1,21 +1,27 @@
-// vibespace-server — wraps the lobby in an SSH server so anyone can connect
-// with `ssh -p 2222 you@host` and land in the chat.
+// vibespace-server — wraps the lobby in an SSH server AND fronts a WebSocket
+// endpoint so locally-installed binaries can join the same chat.
 //
-// One shared hub.Hub backs every session; each SSH connection gets its own
-// app.App (intro + lobby) using the SSH user name as identity.
+// One shared LocalHub backs every session. SSH connections each get an
+// app.App (intro + lobby) using the SSH user name as identity. WebSocket
+// connections come from the local binary, authenticate with a GitHub
+// access token (device-flow), and subscribe to the same hub via a thin
+// JSON wire protocol — so SSH "glimpsers" and binary users see each other's
+// messages in real time.
 //
 // Configuration via env vars:
 //
-//	VIBESPACE_ADDR           listen address, default ":2222"
-//	VIBESPACE_HOSTKEY        host key path, default ".ssh/id_ed25519" (auto-generated on first run)
-//	VIBESPACE_GH_CLIENT_ID   GitHub OAuth app client id (enables /auth github)
+//	VIBESPACE_ADDR           SSH listen address, default ":2222"
+//	VIBESPACE_HTTP_ADDR      HTTP/WS listen address, default ":8080" (empty disables)
+//	VIBESPACE_HOSTKEY        SSH host key path, default ".ssh/id_ed25519" (auto-generated on first run)
+//	VIBESPACE_GH_CLIENT_ID   GitHub OAuth app client id (enables /auth github + WS bearer-token verification)
 //	VIBESPACE_IDENTITY_PATH  path to identity store JSON, default "./identities.json"
 //	VIBESPACE_DATA_PATH      path to profile/posts/friends SQLite DB, default "./vibespace.db"
 //	VIBESPACE_RADIO_CACHE    dir for the radio manifest cache, default "./radio-cache"
 //	VIBESPACE_RADIO_MANIFEST radio manifest URL override (default = release-hosted manifest)
 //
-// Run on a non-22 port unless you've moved system OpenSSH. Front it with a
-// tunnel or VPS proxy before pointing public DNS at your home machine.
+// Run SSH on a non-22 port unless you've moved system OpenSSH. Front the HTTP
+// listener with Caddy (or another TLS-terminating reverse proxy) before
+// exposing it; the binary itself speaks plain HTTP/WS.
 package main
 
 import (
@@ -47,6 +53,7 @@ import (
 
 func main() {
 	addr := envOr("VIBESPACE_ADDR", ":2222")
+	httpAddr := envOr("VIBESPACE_HTTP_ADDR", ":8080")
 	hostKey := envOr("VIBESPACE_HOSTKEY", ".ssh/id_ed25519")
 	ghClientID := os.Getenv("VIBESPACE_GH_CLIENT_ID")
 	identityPath := envOr("VIBESPACE_IDENTITY_PATH", "./identities.json")
@@ -56,7 +63,7 @@ func main() {
 	_ = os.MkdirAll(radioCacheDir, 0o700)
 	radioClient := radio.NewClient(radioCacheDir, radioManifestURL)
 
-	world := hub.New()
+	world := hub.NewLocal()
 
 	// The profile/posts/friends SQLite store is always opened — profiles work
 	// without auth, just without cached GitHub data.
@@ -68,8 +75,9 @@ func main() {
 	log.Printf("data store at %s", dataPath)
 
 	var authSvc *auth.Service
+	var idStore *identity.Store
 	if ghClientID != "" {
-		idStore, err := identity.Open(identityPath)
+		idStore, err = identity.Open(identityPath)
 		if err != nil {
 			log.Fatalf("identity store: %v", err)
 		}
@@ -78,6 +86,10 @@ func main() {
 	} else {
 		log.Printf("github auth disabled (set VIBESPACE_GH_CLIENT_ID to enable)")
 	}
+
+	// The WebSocket endpoint is what locally-installed binaries connect to.
+	// Disabled when GitHub auth isn't configured (no way to identify clients).
+	httpSrv := runHTTPServer(httpAddr, world, authSvc, idStore, ghClientID)
 
 	s, err := wish.NewServer(
 		wish.WithAddress(addr),
@@ -140,10 +152,15 @@ func main() {
 	if err := s.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 		log.Printf("shutdown: %v", err)
 	}
+	if httpSrv != nil {
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			log.Printf("ws shutdown: %v", err)
+		}
+	}
 }
 
 // teaHandler returns a wish bubbletea handler that builds a per-session app.
-func teaHandler(world *hub.Hub, authSvc *auth.Service, data *store.Store, radioClient *radio.Client) bm.Handler {
+func teaHandler(world *hub.LocalHub, authSvc *auth.Service, data *store.Store, radioClient *radio.Client) bm.Handler {
 	return func(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
 		_, _, hasPty := sess.Pty()
 		if !hasPty {

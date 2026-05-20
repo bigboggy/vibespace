@@ -1,5 +1,5 @@
 // Package lobby is the chat screen. It renders channels and messages from a
-// shared *hub.Hub, owning only session-local UI state (input, history, scroll,
+// shared hub.Hub, owning only session-local UI state (input, history, scroll,
 // active channel, identity).
 //
 // Files in this package:
@@ -39,7 +39,7 @@ import (
 type Screen struct {
 	styles *theme.Styles // shared with app + intro; mutated by /theme
 
-	hub    *hub.Hub
+	hub    hub.Hub
 	subID  uint64
 	events <-chan hub.Event
 
@@ -74,7 +74,7 @@ type Screen struct {
 // (may be ""). authSvc may be nil to disable /auth entirely. data is the
 // SQLite store for profiles/posts/friends/guestbook. The session subscribes
 // to the hub immediately; call Cleanup when the session ends.
-func New(styles *theme.Styles, fallbackUser, fingerprint, ghLogin string, h *hub.Hub, authSvc *auth.Service, data *store.Store) *Screen {
+func New(styles *theme.Styles, fallbackUser, fingerprint, ghLogin string, h hub.Hub, authSvc *auth.Service, data *store.Store) *Screen {
 	id, events := h.Subscribe()
 	h.SetViewing(id, "#lobby")
 	me := fallbackUser

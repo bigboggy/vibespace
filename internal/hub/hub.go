@@ -1,9 +1,15 @@
-// Package hub is the server-side source of truth for channels and messages.
+// Package hub is the source of truth for channels and messages.
 //
-// One Hub is shared across all SSH sessions. Each session subscribes to receive
-// Events when state changes; the session's bubbletea program re-renders by
-// reading back from the Hub. The Hub is the only place that holds mutable chat
-// state — sessions own only their own UI state (input, scroll, history).
+// The Hub interface is what sessions and screens depend on. Two implementations
+// exist:
+//
+//   - *LocalHub: in-process, the server holds one and SSH sessions read/write
+//     it directly.
+//   - *RemoteHub (see remote.go): WebSocket-backed mirror used by the local
+//     binary to share state with whatever LocalHub is running on the server.
+//
+// Either way, the Hub is the only place that holds mutable chat state — the
+// session-side code owns only its own UI state (input, scroll, history).
 package hub
 
 import (
@@ -14,6 +20,21 @@ import (
 
 	"github.com/bigboggy/vibespace/internal/ui"
 )
+
+// Hub is the contract every chat backend implements. Both the in-process
+// LocalHub (server) and the network-backed RemoteHub (local binary) satisfy
+// this — screens depend on Hub, not on the concrete implementation.
+type Hub interface {
+	ChannelNames() []string
+	Messages(name string) ([]ui.ChatMessage, bool)
+	HasChannel(name string) bool
+	Online(name string) int
+	Post(channel, author, body string, kind ui.ChatKind)
+	CreateChannel(name string) bool
+	Subscribe() (uint64, <-chan Event)
+	Unsubscribe(id uint64)
+	SetViewing(id uint64, channel string)
+}
 
 // Event signals "something changed in the hub" to subscribers. The kind/name
 // pair is a hint; subscribers re-read the hub to get the new state rather than
@@ -43,8 +64,10 @@ type Channel struct {
 	Messages []ui.ChatMessage
 }
 
-// Hub owns the channel list and broadcasts changes to subscribers.
-type Hub struct {
+// LocalHub owns the channel list and broadcasts changes to subscribers
+// in-process. The server holds one of these; SSH session screens read/write
+// it directly. The local binary uses RemoteHub instead.
+type LocalHub struct {
 	mu       sync.RWMutex
 	order    []string            // channel names in display order; "#lobby" first
 	channels map[string]*Channel // name -> channel
@@ -62,9 +85,10 @@ type sub struct {
 	closed atomic.Bool
 }
 
-// New returns a Hub seeded with the default set of channels and lobby MOTD.
-func New() *Hub {
-	h := &Hub{
+// NewLocal returns a LocalHub seeded with the default set of channels and
+// lobby MOTD.
+func NewLocal() *LocalHub {
+	h := &LocalHub{
 		channels: make(map[string]*Channel),
 		subs:     make(map[uint64]*sub),
 		viewing:  make(map[uint64]string),
@@ -77,7 +101,7 @@ func New() *Hub {
 }
 
 // ChannelNames returns channel names in display order (a snapshot).
-func (h *Hub) ChannelNames() []string {
+func (h *LocalHub) ChannelNames() []string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	out := make([]string, len(h.order))
@@ -87,7 +111,7 @@ func (h *Hub) ChannelNames() []string {
 
 // Messages returns a snapshot of the messages in the named channel. Returns
 // (nil, false) if the channel doesn't exist.
-func (h *Hub) Messages(name string) ([]ui.ChatMessage, bool) {
+func (h *LocalHub) Messages(name string) ([]ui.ChatMessage, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	ch, ok := h.channels[name]
@@ -100,7 +124,7 @@ func (h *Hub) Messages(name string) ([]ui.ChatMessage, bool) {
 }
 
 // HasChannel reports whether a channel with the given name exists.
-func (h *Hub) HasChannel(name string) bool {
+func (h *LocalHub) HasChannel(name string) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	_, ok := h.channels[name]
@@ -109,7 +133,7 @@ func (h *Hub) HasChannel(name string) bool {
 
 // Online returns the number of subscribers currently viewing the named
 // channel.
-func (h *Hub) Online(name string) int {
+func (h *LocalHub) Online(name string) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	n := 0
@@ -123,7 +147,7 @@ func (h *Hub) Online(name string) int {
 
 // Post appends a message to the named channel and broadcasts. If the channel
 // doesn't exist, this is a no-op.
-func (h *Hub) Post(channel, author, body string, kind ui.ChatKind) {
+func (h *LocalHub) Post(channel, author, body string, kind ui.ChatKind) {
 	h.mu.Lock()
 	ch, ok := h.channels[channel]
 	if !ok {
@@ -138,7 +162,7 @@ func (h *Hub) Post(channel, author, body string, kind ui.ChatKind) {
 }
 
 // CreateChannel adds a channel if missing. Returns true if it created one.
-func (h *Hub) CreateChannel(name string) bool {
+func (h *LocalHub) CreateChannel(name string) bool {
 	if !strings.HasPrefix(name, "#") {
 		name = "#" + name
 	}
@@ -160,7 +184,7 @@ func (h *Hub) CreateChannel(name string) bool {
 // dropping is non-fatal — only ordering of notifications is affected).
 //
 // Call Unsubscribe to release resources when the session ends.
-func (h *Hub) Subscribe() (uint64, <-chan Event) {
+func (h *LocalHub) Subscribe() (uint64, <-chan Event) {
 	id := h.nextSub.Add(1)
 	s := &sub{events: make(chan Event, 16)}
 	h.mu.Lock()
@@ -170,7 +194,7 @@ func (h *Hub) Subscribe() (uint64, <-chan Event) {
 }
 
 // Unsubscribe drops the subscriber and any presence it had registered.
-func (h *Hub) Unsubscribe(id uint64) {
+func (h *LocalHub) Unsubscribe(id uint64) {
 	h.mu.Lock()
 	s, ok := h.subs[id]
 	if ok {
@@ -190,7 +214,7 @@ func (h *Hub) Unsubscribe(id uint64) {
 
 // SetViewing records which channel a subscriber is currently looking at, used
 // by Online(). Pass an empty string to clear.
-func (h *Hub) SetViewing(id uint64, channel string) {
+func (h *LocalHub) SetViewing(id uint64, channel string) {
 	h.mu.Lock()
 	prev := h.viewing[id]
 	if channel == "" {
@@ -209,7 +233,7 @@ func (h *Hub) SetViewing(id uint64, channel string) {
 }
 
 // broadcast fans an event out to every subscriber. Drops on full buffer.
-func (h *Hub) broadcast(ev Event) {
+func (h *LocalHub) broadcast(ev Event) {
 	h.mu.RLock()
 	subs := make([]*sub, 0, len(h.subs))
 	for _, s := range h.subs {

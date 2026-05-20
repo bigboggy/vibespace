@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**vibespace** — a TUI IRC-style chat lobby for devs, built with bubbletea / lipgloss / wish. Ships in two modes from one codebase:
+**vibespace** — a TUI IRC-style chat lobby for devs, built with bubbletea / lipgloss / wish. Ships from one codebase with two entrypoints that share state over the network:
 
-- **Local** (`./main.go`): single-process, single-user, in-memory hub. Run via `go run .`.
-- **SSH server** (`./cmd/server/main.go`): a wish SSH server fronting one shared hub. Each session gets its own `app.App` but reads/writes the same `*hub.Hub`.
+- **Local binary** (`./main.go`): the primary client. Connects over WebSocket to the backend (defaults to `wss://vibespace.sh/ws`) so chat is shared with every other binary user and every SSH "glimpse" session. Falls back to an in-process `LocalHub` when no backend is configured / reachable — radio playback and `report` still work offline.
+- **Server** (`./cmd/server/main.go`): a wish SSH server **and** an HTTP/WebSocket API in one process. Both surfaces front the same in-memory `LocalHub`, so SSH peekers and binary users see each other's messages in real time.
 
 Go 1.24+. No test suite, no linter config — `go vet ./...` and `go build ./...` are the only verifiers in tree.
 
@@ -28,18 +28,29 @@ The Go module path is `github.com/bigboggy/vibespace`. All internal imports go t
 
 ## Architecture
 
+### Hub interface, two implementations
+
+`internal/hub` defines the `Hub` interface (the contract every screen depends on) plus two implementations:
+
+- **`*LocalHub`** (`hub.go`): in-process, holds the channels/messages/presence in memory. The server's SSH lobby and the offline-mode local binary use this directly.
+- **`*RemoteHub`** (`remote.go`): a network-backed mirror. The local binary calls `hub.Dial(ctx, url, token)` which opens a WebSocket to the server, sends `{t:"hello",token}`, receives a state snapshot, then keeps a local mirror in sync via streamed wire events. Read methods (`Messages`, `Online`, `ChannelNames`) serve from the mirror; write methods (`Post`, `CreateChannel`, `SetViewing`) send JSON envelopes over the WS.
+
+`internal/hubwire` is the JSON-over-WebSocket wire shared by both sides. A single `Envelope` struct carries every message type; receivers dispatch on the `T` field. Types: `hello`, `welcome`, `state`, `post`, `create`, `view`, `msg`, `created`, `online`, `error`.
+
+The server's WS handler (`cmd/server/ws.go`) bridges the wire to the `LocalHub`: client `post` → `LocalHub.Post`, hub `EventMessage` → wire `msg`, etc. Tokens are verified against `api.github.com/user` and cached for 10 minutes in `wsServer.tokenCache`.
+
 ### Two entrypoints, one app
 
-`main.go` and `cmd/server/main.go` both build the same `app.App` (`internal/app/app.go`). The difference is what they pass in:
+`main.go` and `cmd/server/main.go` both build the same `app.App` (`internal/app/app.go`):
 
-- Local mode wires one `app.App` to a fresh `hub.New()` with no auth service. Identity is `@<os-user>`.
-- Server mode (`cmd/server/main.go`) creates one `*hub.Hub` and one `*auth.Service` at startup, then per-SSH-session builds an `app.App` against the shared hub. Identity comes from the SSH pubkey fingerprint (resolved via `auth.Service.Lookup`) or a sanitized `sess.User()`.
+- **Local mode** (`main.go`) calls `connectBackend(...)` at startup. If `VIBESPACE_BACKEND` is reachable and `VIBESPACE_GH_CLIENT_ID` is set, it runs the GitHub device flow (or loads a cached token from `$config/vibespace/auth.json`), then `hub.Dial`s the WS endpoint and uses the returned `*RemoteHub`. Falls back to `hub.NewLocal()` on any failure — the rest of the app still runs (radio, profile, report).
+- **Server mode** (`cmd/server/main.go`) creates one `*LocalHub` and one `*auth.Service` at startup, hands the LocalHub to both the wish SSH middleware (per-session `app.App`) and the HTTP WebSocket handler (`ws.go`). SSH identity comes from the SSH pubkey fingerprint (resolved via `auth.Service.Lookup`) or a sanitized `sess.User()`. WS identity comes from the GH access token's verified login.
 
 ### Hub is the only mutable chat state
 
-`internal/hub/hub.go` owns channels, messages, and presence. Sessions read state during `View` and on every `hub.Event` they receive via `Subscribe()`. Sessions never hold their own copy of chat — they own only session-local UI state (input, scroll, history, active channel, identity). This is why server-mode sessions stay consistent without locking on the session side.
+The LocalHub is the only place that holds mutable chat state on the server. Sessions (SSH or WS-backed) read state during `View` and on every `hub.Event` they receive via `Subscribe()`. Sessions never hold their own copy of chat — they own only session-local UI state (input, scroll, history, active channel, identity).
 
-`hub.Event` implements `tea.Msg`, so events flow straight through bubbletea. Subscribers re-read the hub on each event rather than trusting the event payload — `broadcast` drops on full channel buffer, which is safe because of this re-read pattern.
+`hub.Event` implements `tea.Msg`, so events flow straight through bubbletea. Subscribers re-read the hub on each event rather than trusting the event payload — `broadcast` drops on full channel buffer, which is safe because of this re-read pattern. The RemoteHub's wire envelopes DO carry payload (so clients don't need a round-trip per event), but the lobby still re-reads on each event for consistency with the SSH path.
 
 ### Screen interface + Navigate messages
 
@@ -80,15 +91,23 @@ Defined in `internal/screens/lobby/commands.go`:
 
 | Var | Default | Purpose |
 |-----|---------|---------|
-| `VIBESPACE_ADDR` | `:2222` | listen addr (use non-22 unless OpenSSH moved) |
+| `VIBESPACE_ADDR` | `:2222` | SSH listen addr (use non-22 unless OpenSSH moved) |
+| `VIBESPACE_HTTP_ADDR` | `:8080` | HTTP/WS listen addr (set empty to disable WS endpoint) |
 | `VIBESPACE_HOSTKEY` | `.ssh/id_ed25519` | SSH host key path (auto-generated) |
-| `VIBESPACE_GH_CLIENT_ID` | unset | enables `/auth`; when set, lobby is gated until auth |
+| `VIBESPACE_GH_CLIENT_ID` | unset | GitHub OAuth client id; enables in-lobby `/auth` AND the WS bearer-token verification (without it, the WS endpoint stays off) |
 | `VIBESPACE_IDENTITY_PATH` | `./identities.json` | fingerprint → GH login store |
 | `VIBESPACE_DATA_PATH` | `./vibespace.db` | SQLite store for profiles/posts/friends/guestbook |
 
-Without `VIBESPACE_GH_CLIENT_ID`, the server runs but `/auth` is disabled and no gating is applied.
+Without `VIBESPACE_GH_CLIENT_ID`, the SSH server still runs but `/auth` is disabled, no SSH gating is applied, and the WebSocket endpoint stays off.
 
-**Local mode** (`go run .`) reads `VIBESPACE_GH_CLIENT_ID` as well — set it to enable `/auth` against the same device flow. The local SQLite + identity store live under `$XDG_CONFIG_HOME/vibespace/` (macOS: `~/Library/Application Support/vibespace/`). There's no SSH layer locally, so the "fingerprint" stored with the GitHub link is synthesized from the OS username (`local:<user>`).
+## Local binary config (env vars)
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `VIBESPACE_BACKEND` | `wss://vibespace.sh/ws` | backend WebSocket URL; set to `off` (or fail to set client id) to run offline-only |
+| `VIBESPACE_GH_CLIENT_ID` | unset | required for backend mode — runs the device flow on first launch |
+
+The cached GH token + login live at `$config/vibespace/auth.json` (mode 0600). The local SQLite, identity store, and radio cache sit in the same directory. On macOS that's `~/Library/Application Support/vibespace/`; on Linux `$XDG_CONFIG_HOME/vibespace/`.
 
 ## Conventions
 
