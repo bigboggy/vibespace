@@ -66,7 +66,11 @@ DIST="$REPO_ROOT/dist/$VERSION"
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
-LDFLAGS="-s -w -X main.version=$VERSION"
+if [[ -z "${VIBESPACE_GH_CLIENT_ID:-}" ]]; then
+  error "VIBESPACE_GH_CLIENT_ID not set — required for baking into release"
+  exit 1
+fi
+LDFLAGS="-s -w -X main.version=$VERSION -X main.bakedClientID=$VIBESPACE_GH_CLIENT_ID"
 
 for platform in "${PLATFORMS[@]}"; do
   OS="${platform%/*}"

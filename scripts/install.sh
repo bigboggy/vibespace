@@ -19,10 +19,11 @@
 # scheduler unit, and re-runs the initial upload — nothing destructive.
 #
 # Environment overrides:
-#   VIBESPACE_INSTALL_DIR   where the binary lands (default: ~/.local/bin)
-#   VIBESPACE_SERVER        upload target (default: vibespace.sh)
-#   VIBESPACE_VERSION       pin a specific release tag (default: latest)
-#   VIBESPACE_NO_SCHEDULE   set to "1" to skip scheduler setup
+#   VIBESPACE_INSTALL_DIR        where the binary lands (default: ~/.local/bin)
+#   VIBESPACE_SERVER             upload target (default: vibespace.sh)
+#   VIBESPACE_VERSION            pin a specific release tag (default: latest)
+#   VIBESPACE_NO_SCHEDULE        set to "1" to skip scheduler setup
+#   VIBESPACE_GH_CLIENT_ID       GitHub OAuth app client ID (baked into binary at release time)
 
 set -euo pipefail
 
@@ -31,6 +32,7 @@ BINARY="vibespace"
 INSTALL_DIR="${VIBESPACE_INSTALL_DIR:-$HOME/.local/bin}"
 SERVER="${VIBESPACE_SERVER:-vibespace.sh}"
 VERSION="${VIBESPACE_VERSION:-latest}"
+CLIENT_ID="${VIBESPACE_GH_CLIENT_ID:-}"
 
 # ── pretty output ──────────────────────────────────────────────────────────
 info()  { printf "\033[1;32m==>\033[0m %s\n" "$*"; }
@@ -151,6 +153,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 Environment=VIBESPACE_SERVER=$SERVER
+Environment=VIBESPACE_GH_CLIENT_ID=$VIBESPACE_GH_CLIENT_ID
 ExecStart=$INSTALL_DIR/$BINARY report
 EOF
 
@@ -195,8 +198,9 @@ schedule_launchd() {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>VIBESPACE_SERVER</key> <string>$SERVER</string>
-    <key>PATH</key>             <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>VIBESPACE_SERVER</key>     <string>$SERVER</string>
+    <key>VIBESPACE_GH_CLIENT_ID</key> <string>$CLIENT_ID</string>
+    <key>PATH</key>                 <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
   <key>StartInterval</key>    <integer>60</integer>
   <key>RunAtLoad</key>        <true/>
@@ -215,7 +219,7 @@ EOF
 
 schedule_cron() {
   command -v crontab >/dev/null 2>&1 || return 1
-  local line="* * * * * VIBESPACE_SERVER=$SERVER $INSTALL_DIR/$BINARY report >/dev/null 2>&1 # vibespace-report"
+  local line="* * * * * VIBESPACE_SERVER=$SERVER VIBESPACE_GH_CLIENT_ID=$CLIENT_ID $INSTALL_DIR/$BINARY report >/dev/null 2>&1 # vibespace-report"
   # Strip any prior vibespace-report line so re-runs stay clean.
   local existing
   existing="$(crontab -l 2>/dev/null | grep -v '# vibespace-report' || true)"

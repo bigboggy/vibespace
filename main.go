@@ -34,6 +34,10 @@ import (
 // force fully offline mode.
 const defaultBackend = "wss://vibespace.sh/ws"
 
+// bakedClientID is overridden at build time via -ldflags -X main.bakedClientID=...
+// to bake the GitHub OAuth client ID into the release binary.
+var bakedClientID = ""
+
 func main() {
 	// Subcommand dispatch. Only `report` is a non-TUI flow today; everything
 	// else falls through to the local lobby below. Lives in its own package
@@ -202,7 +206,10 @@ func connectBackend(configDir string) *hub.RemoteHub {
 
 	clientID := os.Getenv("VIBESPACE_GH_CLIENT_ID")
 	if clientID == "" {
-		fmt.Println("vibespace: VIBESPACE_GH_CLIENT_ID not set — running offline. Set it to enable shared chat.")
+		clientID = bakedClientID
+	}
+	if clientID == "" {
+		fmt.Println("vibespace: VIBESPACE_GH_CLIENT_ID not set — running offline. Set it or rebuild with -ldflags -X main.bakedClientID=...")
 		return nil
 	}
 
